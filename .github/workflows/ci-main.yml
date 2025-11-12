@@ -1,0 +1,156 @@
+name: CI - Main Branch
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  main-ci:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Configure DVC Remote
+        env:
+          GOOGLE_APPLICATION_CREDENTIALS: ${{ secrets.GCP_KEY_JSON }}
+        run: |
+          echo "${GOOGLE_APPLICATION_CREDENTIALS}" > gcp-key.json
+          dvc remote modify myremote credentialpath gcp-key.json
+
+      - name: Pull data from DVC
+        run: dvc pull -r myremote
+
+      - name: Fetch best model from MLflow
+        env:
+          MLFLOW_TRACKING_URI: ${{ secrets.MLFLOW_TRACKING_URI }}
+          MLFLOW_EXPERIMENT_NAME: ${{ secrets.MLFLOW_EXPERIMENT_NAME }}
+        run: |
+          echo "Fetching best model from MLflow experiment..."
+          python <<'PYCODE'
+          import mlflow
+          from mlflow.tracking import MlflowClient
+          import os, shutil
+
+          client = MlflowClient()
+          experiment_name = os.getenv("MLFLOW_EXPERIMENT_NAME")
+          experiment = client.get_experiment_by_name(experiment_name)
+          if not experiment:
+              raise SystemExit(f"Experiment '{experiment_name}' not found in MLflow.")
+          
+          experiment_id = experiment.experiment_id
+          print(f"Searching best model from experiment: {experiment_name} (ID: {experiment_id})")
+
+          results = mlflow.search_logged_models(
+              experiment_ids=[experiment_id],
+              order_by=[{"field_name": "metrics.accuracy", "ascending": False}],
+              max_results=1,
+              output_format="list"
+          )
+
+          if not results:
+              raise SystemExit("No logged models found in this experiment.")
+
+          best_model = results[0]
+          print(f"Best model ID: {best_model.model_id}")
+          print(f"Accuracy: {best_model.metrics[0].value}")
+
+          model_uri = f"models:/{best_model.model_id}"
+          output_dir = "fetched_model"
+          if os.path.exists(output_dir):
+              shutil.rmtree(output_dir)
+
+          os.makedirs(output_dir, exist_ok=True)
+          mlflow.artifacts.download_artifacts(artifact_uri=model_uri, dst_path=output_dir)
+          print(f"Saved best model locally at '{output_dir}/'")
+          PYCODE
+
+      - name: Evaluate model performance
+        run: |
+          python <<'PYCODE'
+          import mlflow.pyfunc
+          import pandas as pd
+          from sklearn.model_selection import train_test_split
+          from sklearn.metrics import accuracy_score, classification_report
+
+          model = mlflow.pyfunc.load_model("fetched_model")
+          df = pd.read_csv("data/iris.csv")
+
+          X = df.drop(columns=["species"])
+          y = df["species"]
+          X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+          y_pred = model.predict(X_test)
+          acc = accuracy_score(y_test, y_pred)
+          report = classification_report(y_test, y_pred, output_dict=False)
+
+          print(f"Test Accuracy: {acc:.4f}")
+          print(report)
+
+          with open("accuracy_report.md", "w") as f:
+              f.write("## Production Model Evaluation\n\n")
+              f.write(f"**Test Accuracy:** {acc:.4f}\n\n")
+              f.write("### Sample Predictions:\n\n")
+              sample_preds = pd.DataFrame({"True": y_test.values[:5], "Predicted": y_pred[:5]})
+              f.write(sample_preds.to_markdown(index=False))
+              f.write("\n\n```text\n")
+              f.write("### Classification Report\n\n")
+              f.write(report)
+              f.write("\n```\n\n")
+          PYCODE
+
+      - name: Run tests and generate report
+        run: |
+          pytest --maxfail=1 --disable-warnings --tb=short -q --junitxml=report.xml > pytest_output.txt
+
+          echo "## Main Branch PyTest Summary Report" > main_report.md
+          echo "" >> main_report.md
+          echo "**Date:** $(date)" >> main_report.md
+          echo "" >> main_report.md
+          echo "### Test Output" >> main_report.md
+          echo '```' >> main_report.md
+          cat pytest_output.txt >> main_report.md
+          echo '```' >> main_report.md
+          echo "" >> main_report.md
+          pytest --maxfail=1 --disable-warnings --tb=short -q --cov=. --cov-report=term-missing >> pytest_output.txt 2>&1 || true
+
+      - name: Set up CML
+        uses: iterative/setup-cml@v2
+        with:
+          version: latest
+          vega: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Comment CML Report on commit (push)
+        if: github.event_name == 'push'
+        env:
+          REPO_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cat accuracy_report.md >> main_report.md
+          cml comment create --target=commit --publish main_report.md
+
+      - name: Comment CML Report on PR (pull request)
+        if: github.event_name == 'pull_request'
+        env:
+          REPO_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cat accuracy_report.md >> main_report.md
+          cml comment create --target=pr --publish main_report.md

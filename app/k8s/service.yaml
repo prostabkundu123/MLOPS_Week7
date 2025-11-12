@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: iris-fastapi-service
+spec:
+  type: LoadBalancer
+  selector:
+    app: iris-fastapi
+  ports:
+    - port: 80
+      targetPort: 8000

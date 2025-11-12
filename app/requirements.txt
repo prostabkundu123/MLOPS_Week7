@@ -1,0 +1,20 @@
+fastapi
+uvicorn[standard]
+scikit-learn==1.5.2
+joblib==1.4.2
+numpy==1.26.4
+pandas==2.2.3
+pydantic==2.8.0
+
+# Google Cloud Monitoring + Logging + Tracing
+google-cloud-logging==3.11.4
+google-cloud-trace==1.16.2
+google-cloud-monitoring==2.21.0
+
+# OpenTelemetry
+opentelemetry-api==1.31.0
+opentelemetry-sdk==1.31.0
+opentelemetry-instrumentation==0.48b0
+opentelemetry-exporter-gcp-trace==1.11.0
+opentelemetry-exporter-gcp-monitoring==1.11.0a0
+opentelemetry-resourcedetector-gcp==1.11.0a0

@@ -1,0 +1,52 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: iris-fastapi
+  labels:
+    app: iris-fastapi
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: iris-fastapi
+  template:
+    metadata:
+      labels:
+        app: iris-fastapi
+    spec:
+      containers:
+        - name: iris-fastapi
+          image: us-central1-docker.pkg.dev/iitmbs-mlops/iris-repo/iris-fastapi:latest
+          ports:
+            - containerPort: 8000
+          readinessProbe:
+            httpGet:
+              path: /ready_check
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /live_check
+              port: 8000
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          envFrom:
+            - configMapRef:
+                name: iris-fastapi-config
+          env:
+            - name: GOOGLE_CLOUD_PROJECT
+              value: "iitmbs-mlops"
+            - name: OTEL_SERVICE_NAME
+              value: "iris-fastapi"
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "https://otel.googleapis.com:4317"
+            - name: OTEL_RESOURCE_ATTRIBUTES
+              value: "service.name=iris-fastapi"

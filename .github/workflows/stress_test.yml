@@ -1,0 +1,123 @@
+name: Stress Test — GKE Deployment
+
+on:
+  workflow_dispatch:
+
+jobs:
+  stress-test:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: 'read'
+      id-token: 'write'
+
+    env:
+      GKE_CLUSTER: ${{ secrets.GKE_CLUSTER }}
+      GCP_REGION: ${{ secrets.GCP_REGION }}
+      GCP_KEY_JSON: ${{ secrets.GCP_KEY_JSON }}
+      SERVICE_URL: ${{ secrets.SERVICE_URL }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup CML
+        uses: iterative/setup-cml@v2
+        with:
+          version: latest
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ env.GCP_KEY_JSON }}
+
+      - name: Configure GKE credentials
+        uses: google-github-actions/get-gke-credentials@v2
+        with:
+          cluster_name: ${{ env.GKE_CLUSTER }}
+          location: ${{ env.GCP_REGION }}
+
+      - name: Install wrk
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y wrk jq
+
+      - name: Phase 1 - Normal AutoScaling (1–3 pods)
+        run: |
+          echo "## Phase 1 - Normal AutoScaling (1–3 pods)" > stress_report.md
+          echo 'wrk.method = "POST"
+          wrk.body   = "{\"sepal_length\":5.1,\"sepal_width\":3.5,\"petal_length\":1.4,\"petal_width\":0.2}"
+          wrk.headers["Content-Type"] = "application/json"
+          ' > post.lua
+      
+          echo "\`\`\`" >> stress_report.md
+          wrk -t8 -c1000 -d30s -s post.lua $SERVICE_URL > wrk_phase1.txt 2>&1
+          cat wrk_phase1.txt >> stress_report.md
+          echo "\`\`\`" >> stress_report.md
+
+          # Extract key metrics
+          REQ_SEC=$(grep "Requests/sec" wrk_phase1.txt | awk '{print $2}')
+          LATENCY=$(grep "Latency" wrk_phase1.txt | awk '{print $2, $3}')
+          TRANSFER=$(grep "Transfer/sec" wrk_phase1.txt | awk '{print $2, $3}')
+          echo "### 📊 Phase 1 Summary" >> stress_report.md
+          echo "| Metric | Value |" >> stress_report.md
+          echo "|:--------|:--------|" >> stress_report.md
+          echo "| Requests/sec | ${REQ_SEC} |" >> stress_report.md
+          echo "| Avg Latency | ${LATENCY} |" >> stress_report.md
+          echo "| Transfer/sec | ${TRANSFER} |" >> stress_report.md
+
+          echo "### 📈 HPA and Pod Status After Phase 1" >> stress_report.md
+          kubectl get hpa iris-fastapi-hpa >> stress_report.md
+          echo " " >> stress_report.md
+
+      - name: Restrict autoscaling to 1 pod for bottleneck simulation
+        run: |
+          kubectl patch hpa iris-fastapi-hpa -p '{"spec":{"maxReplicas":1}}'
+          sleep 20
+          echo "### Restricted autoscaling to 1 pod" >> stress_report.md
+          kubectl get hpa iris-fastapi-hpa >> stress_report.md
+          echo " " >> stress_report.md
+
+      - name: Phase 2 - Bottleneck Test
+        run: |
+          echo "## Phase 2 - Bottleneck Test (1 Pod, 2000 concurrent requests)" >> stress_report.md
+          echo 'wrk.method = "POST"
+          wrk.body   = "{\"sepal_length\":5.1,\"sepal_width\":3.5,\"petal_length\":1.4,\"petal_width\":0.2}"
+          wrk.headers["Content-Type"] = "application/json"
+          ' > post.lua
+      
+          echo "\`\`\`" >> stress_report.md
+          wrk -t8 -c2000 -d30s -s post.lua $SERVICE_URL > wrk_phase2.txt 2>&1
+          cat wrk_phase2.txt >> stress_report.md
+          echo "\`\`\`" >> stress_report.md
+
+          REQ_SEC=$(grep "Requests/sec" wrk_phase2.txt | awk '{print $2}')
+          LATENCY=$(grep "Latency" wrk_phase2.txt | awk '{print $2, $3}')
+          TRANSFER=$(grep "Transfer/sec" wrk_phase2.txt | awk '{print $2, $3}')
+          echo "### 📊 Phase 2 Summary" >> stress_report.md
+          echo "| Metric | Value |" >> stress_report.md
+          echo "|:--------|:--------|" >> stress_report.md
+          echo "| Requests/sec | ${REQ_SEC} |" >> stress_report.md
+          echo "| Avg Latency | ${LATENCY} |" >> stress_report.md
+          echo "| Transfer/sec | ${TRANSFER} |" >> stress_report.md
+          echo " " >> stress_report.md
+
+      - name: Restore original HPA settings
+        run: |
+          kubectl patch hpa iris-fastapi-hpa -p '{"spec":{"maxReplicas":3}}'
+          echo "### ✅ Restored original HPA settings after phase 2" >> stress_report.md
+          kubectl get hpa iris-fastapi-hpa >> stress_report.md
+
+      - name: Publish stress test report
+        env:
+          REPO_TOKEN: ${{ secrets.CML_TOKEN }}
+        run: |
+          echo "### 🧾 Stress Test Summary"
+          echo "Below is the performance comparison between **normal autoscaling** and **bottleneck test (1 pod)**."
+          cml comment create --target=commit --publish stress_report.md
+
+      - name: Upload stress test report as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: stress-test-report
+          path: stress_report.md
